@@ -1,21 +1,33 @@
 """
-FastAPI server for HealthScan LLM integration
-Run with: python fastapi-server.py
+FastAPI server for HealthScan LLM integration with latest Gemini API
+Integrated with Gemini 2.5 Flash and streaming capabilities
+Run with: python fastapi-gemini-server.py
 """
+
+import asyncio
+import base64
+import io
+import json
+import os
+import re
+import time
+from typing import List, Dict, Any, Optional, AsyncGenerator
+from PIL import Image
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
-import json
-import asyncio
-import base64
-import io
-from PIL import Image
-import time
 
-app = FastAPI(title="HealthScan AI API", version="1.0.0")
+# Import the latest Gemini API client
+from google import genai
+from google.genai import types
+
+app = FastAPI(
+    title="HealthScan AI API with Gemini 2.5",
+    version="2.0.0",
+    description="Advanced food analysis API powered by Google Gemini AI"
+)
 
 # Enable CORS for frontend integration
 app.add_middleware(
@@ -26,9 +38,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize Gemini client
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY environment variable is required")
+
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+# Models configuration
+VISION_MODEL = "gemini-2.5-flash"  # Latest stable model for vision tasks
+CHAT_MODEL = "gemini-2.5-flash"    # Latest stable model for chat
+
+# Request/Response Models
 class FoodAnalysisRequest(BaseModel):
     image_data: str  # Base64 encoded image
     prompt: Optional[str] = None
+    user_preferences: Optional[Dict[str, Any]] = None
 
 class ChatMessage(BaseModel):
     role: str
@@ -39,18 +64,9 @@ class ChatRequest(BaseModel):
     messages: List[Dict[str, Any]]
     context: Optional[Dict[str, Any]] = None
     stream: bool = True
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = 1000
 
-# Mock LLM responses for demonstration
-NUTRITION_RESPONSES = [
-    "Based on the nutritional analysis, this food contains several important nutrients that support overall health.",
-    "The caloric content appears to be moderate, making it suitable for most dietary plans.",
-    "I notice this food has a good balance of macronutrients including proteins, carbohydrates, and healthy fats.",
-    "From a health perspective, this food provides essential vitamins and minerals your body needs.",
-    "The fiber content in this food can help support digestive health and maintain stable blood sugar levels.",
-    "This food contains antioxidants that may help protect your cells from oxidative stress.",
-    "The protein content makes this a good choice for muscle maintenance and repair.",
-    "Consider pairing this with complementary foods to create a more balanced nutritional profile."
-]
 
 def decode_base64_image(image_data: str) -> Image.Image:
     """Decode base64 image data to PIL Image"""
@@ -58,7 +74,7 @@ def decode_base64_image(image_data: str) -> Image.Image:
         # Remove data URL prefix if present
         if image_data.startswith('data:image'):
             image_data = image_data.split(',')[1]
-        
+
         # Decode base64
         image_bytes = base64.b64decode(image_data)
         image = Image.open(io.BytesIO(image_bytes))
@@ -66,174 +82,309 @@ def decode_base64_image(image_data: str) -> Image.Image:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid image data: {str(e)}")
 
-def analyze_food_image(image: Image.Image, prompt: str) -> Dict[str, Any]:
+
+def create_food_analysis_prompt(user_preferences: Optional[Dict] = None) -> str:
+    """Create a comprehensive food analysis prompt"""
+    base_prompt = """
+    You are an expert nutritionist and food analyst. Analyze the food image provided and give a comprehensive nutritional analysis.
+
+    Please provide your analysis in the following structured format:
+
+    ## Food Identification
+    - **Primary Food Items**: List all main food items visible
+    - **Preparation Method**: How the food appears to be prepared
+    - **Estimated Portion Size**: Approximate serving size
+
+    ## Nutritional Analysis
+    - **Calories**: Estimated total calories
+    - **Macronutrients**:
+      - Protein: X grams
+      - Carbohydrates: X grams  
+      - Fat: X grams
+      - Fiber: X grams
+    - **Key Micronutrients**: Important vitamins and minerals present
+
+    ## Health Assessment
+    - **Health Score**: Rate from 1-100 (100 being extremely healthy)
+    - **Health Benefits**: Key nutritional benefits
+    - **Potential Concerns**: Any nutritional concerns or allergens
+
+    ## Recommendations
+    - **Dietary Advice**: Suggestions for this food choice
+    - **Pairing Suggestions**: Foods that would complement this meal
+    - **Portion Guidance**: Appropriate serving size recommendations
     """
-    Mock food analysis function
-    In production, integrate with your preferred LLM/Vision model:
-    - OpenAI GPT-4 Vision
-    - Google Gemini Vision
-    - Anthropic Claude Vision
-    - Custom trained models
-    """
-    
-    # Simulate processing time
-    time.sleep(1)
-    
-    # Mock analysis results
-    food_names = ["Apple", "Banana", "Salad", "Sandwich", "Pizza", "Pasta", "Rice Bowl", "Smoothie"]
-    food_name = food_names[hash(str(image.size)) % len(food_names)]
-    
-    health_score = hash(food_name) % 40 + 60  # Score between 60-100
-    calories = hash(food_name) % 300 + 100    # Calories between 100-400
-    
-    analysis = f"""## Nutritional Analysis: {food_name}
 
-**Health Score: {health_score}/100**
+    if user_preferences:
+        base_prompt += f"\n\n## User Context\nConsider these user preferences: {user_preferences}"
 
-### Nutritional Breakdown
-- **Calories:** {calories} kcal
-- **Protein:** {hash(food_name) % 20 + 5}g
-- **Carbohydrates:** {hash(food_name) % 40 + 20}g
-- **Fat:** {hash(food_name) % 15 + 5}g
-- **Fiber:** {hash(food_name) % 8 + 2}g
+    base_prompt += "\n\nProvide accurate, evidence-based nutritional information. If uncertain about specific values, provide reasonable estimates with appropriate disclaimers."
 
-### Health Benefits
-- Rich in essential vitamins and minerals
-- Good source of dietary fiber
-- Contains beneficial antioxidants
-- Supports overall wellness
+    return base_prompt
 
-### Recommendations
-- Best consumed as part of a balanced diet
-- Consider portion size for optimal benefits
-- Pair with complementary foods for enhanced nutrition
 
-This food choice aligns well with healthy eating patterns and can contribute positively to your daily nutritional goals."""
+async def analyze_food_with_gemini(image: Image.Image, prompt: str) -> Dict[str, Any]:
+    """Analyze food image using Gemini 2.5 Flash Vision"""
+    try:
+        # Convert PIL image to format suitable for Gemini
+        response = client.models.generate_content(
+            model=VISION_MODEL,
+            contents=[image, prompt],
+            config=types.GenerateContentConfig(
+                temperature=0.4,  # Lower temperature for more consistent analysis
+                max_output_tokens=2000,
+                candidate_count=1
+            )
+        )
 
-    return {
-        "food_name": food_name,
-        "health_score": health_score,
-        "calories": calories,
-        "analysis": analysis,
-        "nutritional_info": {
-            "protein": f"{hash(food_name) % 20 + 5}g",
-            "carbs": f"{hash(food_name) % 40 + 20}g",
-            "fat": f"{hash(food_name) % 15 + 5}g",
-            "fiber": f"{hash(food_name) % 8 + 2}g"
-        },
-        "health_benefits": [
-            "Supports immune system function",
-            "Promotes digestive health",
-            "Rich in antioxidants",
-            "Good source of essential nutrients"
-        ],
-        "recommendations": [
-            "Include as part of balanced meals",
-            "Monitor portion sizes",
-            "Combine with other nutrient-dense foods"
-        ]
-    }
+        analysis_text = response.text
 
-async def generate_chat_response(messages: List[Dict], context: Optional[Dict] = None):
-    """
-    Mock chat response generator
-    In production, integrate with your preferred LLM:
-    - OpenAI GPT-4
-    - Anthropic Claude
-    - Google Gemini
-    - Local models via Ollama/LM Studio
-    """
-    
-    # Get the last user message
-    last_message = messages[-1]["content"] if messages else ""
-    
-    # Generate contextual response based on food analysis
-    if context and "food_name" in context:
-        food_name = context["food_name"]
-        health_score = context.get("health_score", 75)
-        
-        if "calories" in last_message.lower():
-            response = f"The {food_name} contains approximately {context.get('calories', 'unknown')} calories. This is considered a moderate caloric content that fits well into most daily meal plans."
-        elif "health" in last_message.lower() or "benefit" in last_message.lower():
-            response = f"The {food_name} has a health score of {health_score}/100. It offers several health benefits including essential nutrients, vitamins, and minerals that support your overall wellness."
-        elif "protein" in last_message.lower():
-            response = f"This {food_name} contains {context.get('nutritional_info', {}).get('protein', 'unknown')} of protein, which is important for muscle maintenance and repair."
-        elif "recommend" in last_message.lower():
-            response = f"For the {food_name}, I recommend consuming it as part of a balanced meal. You could pair it with complementary foods to enhance its nutritional value."
-        else:
-            response = f"Regarding the {food_name} you scanned, it's a nutritious choice with a health score of {health_score}/100. What specific aspect would you like to know more about?"
-    else:
-        # General nutrition advice
-        import random
-        response = random.choice(NUTRITION_RESPONSES)
-    
-    # Simulate streaming by yielding words
-    words = response.split()
-    for i, word in enumerate(words):
-        chunk = word + (" " if i < len(words) - 1 else "")
-        yield json.dumps({"content": chunk}) + "\n"
-        await asyncio.sleep(0.05)  # Simulate typing delay
+        # Parse key metrics from the response (simplified parsing)
+        # In production, you might want more sophisticated parsing
+        health_score = extract_health_score(analysis_text)
+        calories = extract_calories(analysis_text)
+
+        return {
+            "success": True,
+            "analysis": analysis_text,
+            "health_score": health_score,
+            "estimated_calories": calories,
+            "model_used": VISION_MODEL,
+            "timestamp": time.time()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Food analysis failed: {str(e)}")
+
+
+def extract_health_score(text: str) -> int:
+    """Extract health score from analysis text"""
+    # Look for patterns like "Health Score: 85" or "Score: 85/100"
+    patterns = [
+        r"Health Score[:\s]+(\d+)",
+        r"Score[:\s]+(\d+)",
+        r"(\d+)/100",
+        r"rated?\s+(\d+)\s*out\s*of\s*100"
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
+    # Default score if not found
+    return 75
+
+
+def extract_calories(text: str) -> int:
+    """Extract calorie estimate from analysis text"""
+    # Look for patterns like "Calories: 350" or "350 calories"
+    patterns = [
+        r"Calories[:\s]+(\d+)",
+        r"(\d+)\s*calories",
+        r"(\d+)\s*kcal"
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
+    # Default if not found
+    return 250
+
+
+async def generate_chat_response_stream(
+    messages: List[Dict], 
+    context: Optional[Dict] = None,
+    temperature: float = 0.7,
+    max_tokens: int = 1000
+) -> AsyncGenerator[str, None]:
+    """Generate streaming chat response using Gemini 2.5"""
+    try:
+        # Prepare conversation history
+        conversation_parts = []
+
+        # Add context if available
+        if context:
+            context_prompt = f"Context from previous food analysis: {json.dumps(context, indent=2)}\n\n"
+            conversation_parts.append(context_prompt)
+
+        # Add conversation history
+        for msg in messages:
+            role = "user" if msg["role"] == "user" else "model"
+            content = msg["content"]
+            if role == "user":
+                conversation_parts.append(f"User: {content}")
+            else:
+                conversation_parts.append(f"Assistant: {content}")
+
+        # Create the full prompt
+        full_prompt = "\n".join(conversation_parts)
+
+        # Add system instruction for nutrition expertise
+        system_instruction = """You are a knowledgeable nutritionist and health advisor. 
+        Provide helpful, accurate information about nutrition, food, and healthy eating. 
+        Base your responses on scientific evidence and be encouraging while being honest about health implications.
+        If you're discussing a specific food that was analyzed, reference the analysis context provided."""
+
+        # Generate streaming response
+        stream = client.models.generate_content_stream(
+            model=CHAT_MODEL,
+            contents=[system_instruction + "\n\n" + full_prompt],
+            config=types.GenerateContentConfig(
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+                candidate_count=1
+            )
+        )
+
+        # Stream the response
+        for chunk in stream:
+            if chunk.text:
+                yield chunk.text
+
+    except Exception as e:
+        yield f"Error generating response: {str(e)}"
+
 
 @app.post("/analyze-food")
 async def analyze_food(request: FoodAnalysisRequest):
-    """Analyze food image and return nutritional information"""
+    """Analyze food image using Gemini 2.5 Vision API"""
     try:
         # Decode the image
         image = decode_base64_image(request.image_data)
-        
-        # Analyze the food
-        result = analyze_food_image(image, request.prompt or "Analyze this food")
-        
-        return {
-            "success": True,
-            **result
-        }
-        
+
+        # Create analysis prompt
+        prompt = request.prompt or create_food_analysis_prompt(request.user_preferences)
+
+        # Analyze with Gemini
+        result = await analyze_food_with_gemini(image, prompt)
+
+        return result
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
+
 @app.post("/chat")
 async def chat_with_ai(request: ChatRequest):
-    """Chat with AI about nutrition and food"""
+    """Chat with Gemini AI about nutrition and food"""
     try:
         if request.stream:
             # Return streaming response
-            async def generate():
-                yield "data: "
-                async for chunk in generate_chat_response(request.messages, request.context):
-                    yield f"data: {chunk}"
-                yield "data: [DONE]\n"
-            
+            async def generate_stream():
+                async for chunk in generate_chat_response_stream(
+                    request.messages, 
+                    request.context,
+                    request.temperature or 0.7,
+                    request.max_tokens or 1000
+                ):
+                    # Format as Server-Sent Events
+                    yield f"data: {json.dumps({'content': chunk})}\n\n"
+
+                # Send completion signal
+                yield "data: [DONE]\n\n"
+
             return StreamingResponse(
-                generate(),
+                generate_stream(),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"  # Disable Nginx buffering
                 }
             )
         else:
             # Return complete response
             response_parts = []
-            async for chunk in generate_chat_response(request.messages, request.context):
-                chunk_data = json.loads(chunk)
-                response_parts.append(chunk_data["content"])
-            
+            async for chunk in generate_chat_response_stream(
+                request.messages, 
+                request.context,
+                request.temperature or 0.7,
+                request.max_tokens or 1000
+            ):
+                response_parts.append(chunk)
+
             return {
                 "success": True,
-                "response": "".join(response_parts)
+                "response": "".join(response_parts),
+                "model_used": CHAT_MODEL
             }
-            
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "HealthScan AI API"}
+    try:
+        # Test Gemini API connection
+        test_response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents="Hello"
+        )
+
+        return {
+            "status": "healthy",
+            "service": "HealthScan AI API",
+            "gemini_status": "connected",
+            "version": "2.0.0",
+            "models": {
+                "vision": VISION_MODEL,
+                "chat": CHAT_MODEL
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+
+@app.get("/models")
+async def list_models():
+    """List available Gemini models"""
+    try:
+        # In practice, you might want to dynamically fetch available models
+        return {
+            "available_models": {
+                "vision": [
+                    "gemini-2.5-flash",
+                    "gemini-2.0-flash",
+                ],
+                "chat": [
+                    "gemini-2.5-flash", 
+                    "gemini-2.0-flash",
+                ],
+                "multimodal": [
+                    "gemini-2.5-flash",
+                    "gemini-2.0-flash-live-001"
+                ]
+            },
+            "current_config": {
+                "vision_model": VISION_MODEL,
+                "chat_model": CHAT_MODEL
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
-    print("Starting HealthScan FastAPI server...")
-    print("API Documentation: http://localhost:8000/docs")
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+
+    print("🚀 Starting HealthScan FastAPI server with Gemini 2.5...")
+    print("📖 API Documentation: http://localhost:8000/docs")
+    print("🔗 Health Check: http://localhost:8000/health")
+    print("🧠 Models Info: http://localhost:8000/models")
+    print("⚠️  Make sure to set GEMINI_API_KEY environment variable!")
+
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000, 
+        reload=True,
+        log_level="info"
+    )
